@@ -1,0 +1,11 @@
+target/
+installer/target/
+dist/
+public-repo/
+release/
+*.exe
+*.pdb
+*.log
+panic.log
+# Machine-specific linker paths; generated from .cargo/config.example.toml by scripts/env.ps1
+.cargo/config.toml

@@ -1,0 +1,22 @@
+# Template for .cargo/config.toml. scripts/env.ps1 copies it to config.toml on first use and
+# fills in the two placeholders; config.toml is machine-specific and not committed.
+#
+# Why: this project builds without MSVC. The gnullvm target lets LLVM emit import libraries
+# directly (no dlltool). The mingw clang driver arranges the link arguments, Rust's bundled
+# rust-lld does the actual linking, and crt-static makes a single exe that only needs system DLLs.
+#
+# @CLANG@   x86_64-w64-mingw32-clang.exe from an llvm-mingw toolchain
+#           (default: the one bundled with GHC 9.10.3 under C:\ghcup; override with NIUMA_CLANG_BIN)
+# @SYSROOT@ output of `rustc --print sysroot` for the stable-x86_64-pc-windows-gnu toolchain
+#
+# With MSVC installed you can delete config.toml and build for x86_64-pc-windows-msvc instead.
+[build]
+target = "x86_64-pc-windows-gnullvm"
+
+[target.x86_64-pc-windows-gnullvm]
+linker = "@CLANG@"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-fuse-ld=lld",
+    "-C", "link-arg=-B@SYSROOT@/lib/rustlib/x86_64-pc-windows-gnu/bin/gcc-ld",
+]

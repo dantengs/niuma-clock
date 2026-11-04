@@ -1,0 +1,23 @@
+[package]
+name = "niuma-setup"
+version = "0.1.0"
+edition = "2024"
+description = "《牛马上下班》安装程序：内嵌 NiuMa.exe，按用户安装，不需要管理员权限"
+
+[dependencies]
+miniz_oxide = "0.8.9"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Registry", "Win32_System_LibraryLoader"] }
+
+[build-dependencies]
+miniz_oxide = "0.8.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# 构建脚本要压缩 6 MB 的程序，不优化的话很慢。
+[profile.release.build-override]
+opt-level = 3
