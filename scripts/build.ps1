@@ -39,4 +39,16 @@ try {
 $setup = Join-Path $dist "NiuMa-Setup.exe"
 Copy-Item (Join-Path $root "installer\target\x86_64-pc-windows-gnullvm\release\niuma-setup.exe") $setup -Force
 Stamp-Icon $setup
+
+# Privacy check: the binaries must not contain local paths (user name, profile, checkout path).
+# --remap-path-prefix in .cargo/config.toml rewrites them; this catches a misconfigured build.
+$needles = @($env:USERNAME, $env:USERPROFILE, $root) | Where-Object { $_ } | ForEach-Object { $_.ToLower() }
+foreach ($bin in $out, $setup) {
+    $bytes = [IO.File]::ReadAllBytes($bin)
+    $text = ([Text.Encoding]::ASCII.GetString($bytes) + [Text.Encoding]::Unicode.GetString($bytes)).ToLower()
+    foreach ($n in $needles) {
+        if ($text.Contains($n)) { throw "privacy check failed: $bin contains a local path or user name" }
+    }
+}
+Write-Host "privacy check: no local paths in the binaries"
 Get-Item $out, $setup | Select-Object FullName, Length

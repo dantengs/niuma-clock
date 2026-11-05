@@ -8,6 +8,8 @@
 # @CLANG@   x86_64-w64-mingw32-clang.exe from an llvm-mingw toolchain
 #           (default: the one bundled with GHC 9.10.3 under C:\ghcup; override with NIUMA_CLANG_BIN)
 # @SYSROOT@ output of `rustc --print sysroot` for the stable-x86_64-pc-windows-gnu toolchain
+# @CARGO_HOME@ / @ROOT@  cargo home and this checkout; remapped so panic locations in the
+#           binary read /cargo/... and /niuma-clock/... instead of local paths with the user name
 #
 # With MSVC installed you can delete config.toml and build for x86_64-pc-windows-msvc instead.
 [build]
@@ -19,4 +21,6 @@ rustflags = [
     "-C", "target-feature=+crt-static",
     "-C", "link-arg=-fuse-ld=lld",
     "-C", "link-arg=-B@SYSROOT@/lib/rustlib/x86_64-pc-windows-gnu/bin/gcc-ld",
+    '--remap-path-prefix=@CARGO_HOME@=/cargo',
+    '--remap-path-prefix=@ROOT@=/niuma-clock',
 ]
