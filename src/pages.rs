@@ -313,6 +313,21 @@ impl App {
                             e.cfg.hide_money = !e.cfg.hide_money;
                             e.cfg_dirty = true;
                         }
+                        if stats.on_duty || stats.lunch_until.is_some() {
+                            let label = if stats.lunch_until.is_some() { "结束午休" } else { "开始午休" };
+                            let button = egui::Button::new(RichText::new(label).size(12.0).color(pal.hero_ink))
+                                .fill(egui::Color32::from_white_alpha(22))
+                                .stroke(Stroke::NONE)
+                                .corner_radius(8);
+                            let hint = "午休期间不弹任何提醒，循环倒计时暂停；吃药提醒等午休结束再响";
+                            if ui.add(button).on_hover_text(hint).clicked() {
+                                if stats.lunch_until.is_some() {
+                                    e.end_lunch(now);
+                                } else {
+                                    e.start_lunch(now);
+                                }
+                            }
+                        }
                     });
                 });
 
@@ -367,6 +382,10 @@ impl App {
                     self.toggle_clock(e, now);
                 }
                 let sub = match stats.session_start {
+                    _ if stats.lunch_until.is_some() => format!(
+                        "午休中，{} 结束 · 期间不弹提醒，循环倒计时已暂停",
+                        stats.lunch_until.unwrap_or(now).format("%H:%M")
+                    ),
                     Some(start) => format!("{} 上班 · 已工作 {}", start.format("%H:%M"), widgets::duration_text(stats.worked_secs)),
                     None if stats.worked_secs > 0.0 => format!("今天已工作 {}，可以再次打卡继续", widgets::duration_text(stats.worked_secs)),
                     None => "今天还没打卡".to_owned(),
@@ -1022,6 +1041,7 @@ impl App {
         card(ui, &pal, |ui| {
             section(ui, &pal, "赚钱表", "数据只存在本机。");
             let s = &mut e.cfg.salary;
+            let lunch_quiet = &mut e.cfg.lunch_quiet;
             egui::Grid::new("salary").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                 ui.label("月薪");
                 ui.add(egui::DragValue::new(&mut s.monthly).range(0.0..=100_000_000.0).speed(100.0).prefix(format!("{} ", s.currency)));
@@ -1040,14 +1060,14 @@ impl App {
                 ui.end_row();
                 ui.label("午休");
                 ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        time_field(ui, &mut s.lunch_start, "lunch-start");
+                        ui.label("到");
+                        time_field(ui, &mut s.lunch_end, "lunch-end");
+                    });
                     ui.checkbox(&mut s.lunch_unpaid, "午休不计薪");
-                    if s.lunch_unpaid {
-                        ui.horizontal(|ui| {
-                            time_field(ui, &mut s.lunch_start, "lunch-start");
-                            ui.label("到");
-                            time_field(ui, &mut s.lunch_end, "lunch-end");
-                        });
-                    }
+                    ui.checkbox(lunch_quiet, "午休模式：这段时间不弹提醒，循环倒计时暂停")
+                        .on_hover_text("上班时到点自动进入。吃药提醒等午休结束再响。\n别的时间吃饭，可以在“今日”页或托盘菜单手动开始午休。");
                 });
                 ui.end_row();
                 ui.label("跳字频率");

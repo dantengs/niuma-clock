@@ -153,6 +153,8 @@ pub struct Config {
     /// 锁屏、休眠期间暂停活动类倒计时。吃药提醒不受影响。
     pub pause_when_away: bool,
     pub work_end_reminder: bool,
+    /// 午休模式：到了设置里的午休时间（且在上班）自动进入，期间不弹任何提醒，循环倒计时暂停。
+    pub lunch_quiet: bool,
     pub floating_bar: bool,
     pub floating_pos: Option<[f32; 2]>,
     pub hide_money: bool,
@@ -191,6 +193,7 @@ impl Default for Config {
             snooze_minutes: 5,
             pause_when_away: true,
             work_end_reminder: true,
+            lunch_quiet: true,
             floating_bar: true,
             floating_pos: None,
             hide_money: false,
@@ -337,4 +340,8 @@ pub struct Data {
     /// 每月已赚的手动调整（键为 "2026-11"），用于补上装软件之前已经赚到的部分。
     pub month_adjust: BTreeMap<String, f64>,
     pub expenses: Vec<Expense>,
+    /// 手动开始的午休，到这个时刻结束。
+    pub lunch_manual_until: Option<NaiveDateTime>,
+    /// 这一天提前结束了自动午休，当天不再自动进入。
+    pub lunch_auto_off: Option<NaiveDate>,
 }

@@ -310,6 +310,9 @@ fn status_lines(stats: &TodayStats, pending: usize) -> (String, String) {
     if !stats.on_duty {
         return ("今日收入".to_owned(), "未在上班".to_owned());
     }
+    if let Some(until) = stats.lunch_until {
+        return ("午休中".to_owned(), format!("{} 结束", until.format("%H:%M")));
+    }
     match stats.to_end_secs {
         Some(left) if left > 0 => ("距下班".to_owned(), widgets::clock_text(left)),
         Some(left) => ("已超时".to_owned(), widgets::clock_text(-left)),

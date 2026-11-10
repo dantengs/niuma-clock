@@ -68,6 +68,8 @@ pub struct TodayStats {
     pub done: u32,
     pub skipped: u32,
     pub hp: i32,
+    /// 正在午休时为午休结束时刻。
+    pub lunch_until: Option<NaiveDateTime>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -329,6 +331,7 @@ impl Engine {
             done: log.done,
             skipped: log.skipped,
             hp: hp_score(log.done, log.skipped, overtime_secs, self.data.health),
+            lunch_until: self.lunch_until(now),
         }
     }
 
@@ -818,6 +821,43 @@ impl Engine {
         self.data_dirty = true;
     }
 
+    // ---------- 午休 ----------
+
+    /// 正在午休时返回午休结束时刻。手动午休随时可开；自动午休只在上班期间、设置的午休时间段内生效。
+    pub fn lunch_until(&self, now: NaiveDateTime) -> Option<NaiveDateTime> {
+        if let Some(until) = self.data.lunch_manual_until.filter(|until| now < *until) {
+            return Some(until);
+        }
+        let s = &self.cfg.salary;
+        if !self.cfg.lunch_quiet || !self.on_duty() || s.lunch_start >= s.lunch_end {
+            return None;
+        }
+        let (start, end) = (now.date().and_time(s.lunch_start), now.date().and_time(s.lunch_end));
+        (now >= start && now < end && self.data.lunch_auto_off != Some(now.date())).then_some(end)
+    }
+
+    /// 现在开始午休，时长取设置里的午休时长（没设好时按 1 小时）。
+    pub fn start_lunch(&mut self, now: NaiveDateTime) {
+        let s = &self.cfg.salary;
+        let minutes = if s.lunch_start < s.lunch_end {
+            (s.lunch_end - s.lunch_start).num_minutes()
+        } else {
+            60
+        };
+        self.data.lunch_manual_until = Some(now + Duration::minutes(minutes));
+        self.data.lunch_auto_off = None;
+        self.data_dirty = true;
+    }
+
+    /// 提前结束午休。如果正处在自动午休时间段，当天不再自动进入。
+    pub fn end_lunch(&mut self, now: NaiveDateTime) {
+        self.data.lunch_manual_until = None;
+        if self.lunch_until(now).is_some() {
+            self.data.lunch_auto_off = Some(now.date());
+        }
+        self.data_dirty = true;
+    }
+
     // ---------- 心跳 ----------
 
     pub fn tick(&mut self, now: NaiveDateTime, env: TickEnv) -> Vec<Notice> {
@@ -837,8 +877,14 @@ impl Engine {
             self.data_dirty = true;
         }
 
-        // 锁屏、休眠或程序没运行的这段时间，活动类倒计时顺延，不算作没动。
-        if self.cfg.pause_when_away && gap_ms > 0 && (env.away || long_gap) {
+        if self.data.lunch_manual_until.is_some_and(|until| now >= until) {
+            self.data.lunch_manual_until = None;
+            self.data_dirty = true;
+        }
+        let lunch = self.lunch_until(now).is_some();
+
+        // 锁屏、休眠、午休或程序没运行的这段时间，活动类倒计时顺延，不算作没动。
+        if gap_ms > 0 && (lunch || (self.cfg.pause_when_away && (env.away || long_gap))) {
             let shift = Duration::milliseconds(gap_ms);
             for l in self
                 .data
@@ -851,7 +897,8 @@ impl Engine {
         }
 
         let mut notices = Vec::new();
-        if env.quiet {
+        // 全屏时推迟；午休时什么都不弹（吃药提醒也等午休结束再响）。
+        if env.quiet || lunch {
             return notices;
         }
         let style = self.cfg.alert_style;
@@ -1208,6 +1255,69 @@ mod tests {
         assert_eq!(walk(&mut e, dt(2, 9, 15), dt(2, 9, 50)), 0, "暂停的喝水过了 9:45 也不响");
         e.toggle_pause(id, dt(2, 10, 0));
         assert_eq!(e.data.loops[0].next_fire, dt(2, 10, 30));
+    }
+
+    #[test]
+    fn lunch_silences_and_freezes_loops() {
+        let mut e = engine();
+        e.clock_in(dt(2, 11, 50));
+        assert_eq!(walk(&mut e, dt(2, 11, 50), dt(2, 11, 59)), 0);
+        let left: Vec<i64> = e.data.loops.iter().map(|l| (l.next_fire - dt(2, 12, 0)).num_seconds()).collect();
+        assert!(left.iter().all(|s| *s < 3600), "默认循环本该在午休中到点");
+
+        assert_eq!(e.lunch_until(dt(2, 12, 30)), Some(dt(2, 13, 0)));
+        assert_eq!(walk(&mut e, dt(2, 11, 59) + Duration::seconds(30), dt(2, 12, 59) + Duration::seconds(30)), 0);
+        assert!(e.alerts().is_empty(), "午休中不弹卡片");
+        assert_eq!(e.lunch_until(dt(2, 13, 0)), None);
+        for (l, before) in e.data.loops.iter().zip(&left) {
+            let after = (l.next_fire - dt(2, 13, 0)).num_seconds();
+            assert!((after - before).abs() <= 60, "午休期间倒计时暂停：{before} → {after}");
+        }
+        assert!(walk(&mut e, dt(2, 13, 0), dt(2, 14, 0)) > 0, "午休结束后照常提醒");
+    }
+
+    #[test]
+    fn lunch_defers_meds_until_it_ends() {
+        let mut e = engine();
+        e.clock_in(dt(2, 9, 0));
+        e.add_med("布洛芬".into(), String::new(), String::new(), MedSchedule::Times { times: vec![hm(12, 10)] }, dt(2, 9, 0));
+        e.set_health(Health::Unwell, dt(2, 9, 0));
+        e.data.sick_prompt_pending = false;
+        e.data.loops.clear();
+        assert_eq!(walk(&mut e, dt(2, 11, 0), dt(2, 12, 59) + Duration::seconds(30)), 0);
+        assert!(tick(&mut e, dt(2, 13, 0)).iter().any(|n| n.title.contains("布洛芬")));
+    }
+
+    #[test]
+    fn auto_lunch_needs_duty_and_setting() {
+        let mut e = engine();
+        assert_eq!(e.lunch_until(dt(2, 12, 30)), None, "没上班不自动午休");
+        e.clock_in(dt(2, 9, 0));
+        assert_eq!(e.lunch_until(dt(2, 11, 59)), None);
+        assert_eq!(e.lunch_until(dt(2, 12, 0)), Some(dt(2, 13, 0)));
+        e.cfg.lunch_quiet = false;
+        assert_eq!(e.lunch_until(dt(2, 12, 30)), None);
+    }
+
+    #[test]
+    fn manual_lunch_and_early_end() {
+        let mut e = engine();
+        e.clock_in(dt(2, 9, 0));
+        e.start_lunch(dt(2, 14, 0));
+        assert_eq!(e.lunch_until(dt(2, 14, 30)), Some(dt(2, 15, 0)), "手动午休按设置的午休时长");
+        e.end_lunch(dt(2, 14, 20));
+        assert_eq!(e.lunch_until(dt(2, 14, 21)), None);
+        assert_eq!(e.lunch_until(dt(2, 12, 30)), Some(dt(2, 13, 0)), "手动结束不影响自动午休");
+
+        e.end_lunch(dt(2, 12, 10));
+        assert_eq!(e.lunch_until(dt(2, 12, 30)), None, "提前结束自动午休，当天不再进入");
+        e.clock_out(dt(2, 18, 0));
+        e.clock_in(dt(3, 9, 0));
+        assert_eq!(e.lunch_until(dt(3, 12, 30)), Some(dt(3, 13, 0)), "第二天照常");
+
+        e.start_lunch(dt(3, 15, 0));
+        tick(&mut e, dt(3, 16, 0));
+        assert_eq!(e.data.lunch_manual_until, None, "到时自动清掉");
     }
 
     #[test]

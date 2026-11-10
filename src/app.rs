@@ -59,6 +59,7 @@ enum UiCmd {
     ToggleClock,
     ToggleFloating,
     ToggleHideMoney,
+    ToggleLunch,
     Quit,
 }
 
@@ -75,6 +76,7 @@ const MENU_SHOW: &str = "show";
 const MENU_CLOCK: &str = "clock";
 const MENU_FLOATING: &str = "floating";
 const MENU_HIDE: &str = "hide-money";
+const MENU_LUNCH: &str = "lunch";
 const MENU_QUIT: &str = "quit";
 
 const BOSS_KEY_LABEL: &str = "Ctrl + Alt + B";
@@ -82,6 +84,7 @@ const MIN_FRAME: Duration = Duration::from_millis(16);
 
 struct Tray {
     clock: MenuItem,
+    lunch: MenuItem,
     floating: CheckMenuItem,
     hide: CheckMenuItem,
     last_tip: Instant,
@@ -189,6 +192,7 @@ fn spawn_worker(
 
 fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool) -> Option<Tray> {
     let clock = MenuItem::with_id(MENU_CLOCK, clock_menu_text(on_duty), true, None);
+    let lunch = MenuItem::with_id(MENU_LUNCH, lunch_menu_text(false), on_duty, None);
     let floating = CheckMenuItem::with_id(MENU_FLOATING, "显示悬浮赚钱条", true, cfg.floating_bar, None);
     let hide = CheckMenuItem::with_id(
         MENU_HIDE,
@@ -201,6 +205,7 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
     menu.append_items(&[
         &MenuItem::with_id(MENU_SHOW, "打开主界面", true, None),
         &clock,
+        &lunch,
         &PredefinedMenuItem::separator(),
         &floating,
         &hide,
@@ -226,6 +231,7 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
             MENU_CLOCK => UiCmd::ToggleClock,
             MENU_FLOATING => UiCmd::ToggleFloating,
             MENU_HIDE => UiCmd::ToggleHideMoney,
+            MENU_LUNCH => UiCmd::ToggleLunch,
             MENU_QUIT => UiCmd::Quit,
             _ => return,
         };
@@ -246,6 +252,7 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
 
     Some(Tray {
         clock,
+        lunch,
         floating,
         hide,
         last_tip: Instant::now() - Duration::from_secs(60),
@@ -255,6 +262,10 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
 
 fn clock_menu_text(on_duty: bool) -> &'static str {
     if on_duty { "下班打卡" } else { "上班打卡" }
+}
+
+fn lunch_menu_text(in_lunch: bool) -> &'static str {
+    if in_lunch { "结束午休" } else { "开始午休（不打扰）" }
 }
 
 impl App {
@@ -459,6 +470,15 @@ impl App {
                     e.cfg.hide_money = !e.cfg.hide_money;
                     e.cfg_dirty = true;
                 }
+                UiCmd::ToggleLunch => {
+                    let mut e = lock(&self.engine);
+                    let now = local_now();
+                    if e.lunch_until(now).is_some() {
+                        e.end_lunch(now);
+                    } else {
+                        e.start_lunch(now);
+                    }
+                }
             }
         }
     }
@@ -471,6 +491,9 @@ impl App {
         tray.floating.set_checked(e.cfg.floating_bar);
         tray.hide.set_checked(e.cfg.hide_money);
         tray.clock.set_text(clock_menu_text(e.on_duty()));
+        let in_lunch = e.lunch_until(local_now()).is_some();
+        tray.lunch.set_text(lunch_menu_text(in_lunch));
+        tray.lunch.set_enabled(e.on_duty() || in_lunch);
         if tray.last_tip.elapsed() < Duration::from_secs(5) {
             return;
         }
@@ -479,6 +502,7 @@ impl App {
         let stats = e.stats(now);
         let money = widgets::money(&e.cfg, stats.earned_exact);
         let tip = match stats.to_end_secs {
+            _ if stats.lunch_until.is_some() => format!("牛马上下班\n今日 {money} · 午休中，不打扰"),
             Some(left) if stats.on_duty && left > 0 => {
                 format!("牛马上下班\n今日 {money} · 距下班 {}", widgets::clock_text(left))
             }
