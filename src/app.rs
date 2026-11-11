@@ -59,6 +59,7 @@ enum UiCmd {
     ToggleClock,
     ToggleFloating,
     ToggleHideMoney,
+    ToggleBoss,
     ToggleLunch,
     Quit,
 }
@@ -69,6 +70,8 @@ pub struct Shared {
     show_requested: AtomicBool,
     /// 全屏或演示中，隐藏所有悬浮窗口。
     pub quiet: AtomicBool,
+    /// 老板键：藏起所有窗口，新提醒先推迟。
+    pub boss: AtomicBool,
     pub save_error: Mutex<Option<String>>,
 }
 
@@ -76,6 +79,7 @@ const MENU_SHOW: &str = "show";
 const MENU_CLOCK: &str = "clock";
 const MENU_FLOATING: &str = "floating";
 const MENU_HIDE: &str = "hide-money";
+const MENU_BOSS: &str = "boss";
 const MENU_LUNCH: &str = "lunch";
 const MENU_QUIT: &str = "quit";
 
@@ -87,6 +91,7 @@ struct Tray {
     lunch: MenuItem,
     floating: CheckMenuItem,
     hide: CheckMenuItem,
+    boss: CheckMenuItem,
     last_tip: Instant,
     icon: TrayIcon,
 }
@@ -110,6 +115,9 @@ pub struct App {
     hotkey: Option<GlobalHotKeyManager>,
     boss_hotkey: HotKey,
     pub boss_key_error: Option<String>,
+    /// 老板键按下后所有窗口都藏着；boss_restore_main 记住当时主窗口是否开着，恢复时用。
+    boss_hidden: bool,
+    boss_restore_main: bool,
     rx: Receiver<UiCmd>,
     last_forgot_check: Instant,
     /// 悬浮条已经按正确的缩放放到位。之前用户拖到哪就在哪，不再强行摆回去。
@@ -143,11 +151,13 @@ fn spawn_worker(
         let mut last_second = 0;
         loop {
             thread::sleep(Duration::from_millis(250));
+            let quiet = platform::quiet_mode();
+            shared.quiet.store(quiet, Ordering::Relaxed);
+            // 老板键藏起窗口时，新提醒也先推迟（不弹窗、不响、不发通知），恢复后再补上。
             let env = TickEnv {
                 away: platform::session_locked(),
-                quiet: platform::quiet_mode(),
+                quiet: quiet || shared.boss.load(Ordering::Relaxed),
             };
-            shared.quiet.store(env.quiet, Ordering::Relaxed);
             let now = local_now();
             let (notices, cfg, data) = {
                 let mut e = lock(&engine);
@@ -194,13 +204,8 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
     let clock = MenuItem::with_id(MENU_CLOCK, clock_menu_text(on_duty), true, None);
     let lunch = MenuItem::with_id(MENU_LUNCH, lunch_menu_text(false), on_duty, None);
     let floating = CheckMenuItem::with_id(MENU_FLOATING, "显示悬浮赚钱条", true, cfg.floating_bar, None);
-    let hide = CheckMenuItem::with_id(
-        MENU_HIDE,
-        format!("老板键：隐藏金额\t{BOSS_KEY_LABEL}"),
-        true,
-        cfg.hide_money,
-        None,
-    );
+    let hide = CheckMenuItem::with_id(MENU_HIDE, "隐藏金额", true, cfg.hide_money, None);
+    let boss = CheckMenuItem::with_id(MENU_BOSS, format!("老板键：藏起所有窗口\t{BOSS_KEY_LABEL}"), true, false, None);
     let menu = Menu::new();
     menu.append_items(&[
         &MenuItem::with_id(MENU_SHOW, "打开主界面", true, None),
@@ -209,6 +214,7 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
         &PredefinedMenuItem::separator(),
         &floating,
         &hide,
+        &boss,
         &PredefinedMenuItem::separator(),
         &MenuItem::with_id(MENU_QUIT, "退出", true, None),
     ])
@@ -231,6 +237,7 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
             MENU_CLOCK => UiCmd::ToggleClock,
             MENU_FLOATING => UiCmd::ToggleFloating,
             MENU_HIDE => UiCmd::ToggleHideMoney,
+            MENU_BOSS => UiCmd::ToggleBoss,
             MENU_LUNCH => UiCmd::ToggleLunch,
             MENU_QUIT => UiCmd::Quit,
             _ => return,
@@ -255,6 +262,7 @@ fn build_tray(tx: Sender<UiCmd>, ctx: egui::Context, cfg: &Config, on_duty: bool
         lunch,
         floating,
         hide,
+        boss,
         last_tip: Instant::now() - Duration::from_secs(60),
         icon: tray_icon,
     })
@@ -298,7 +306,7 @@ impl App {
         let hotkey_ctx = ctx.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if event.state() == HotKeyState::Pressed {
-                let _ = tx.send(UiCmd::ToggleHideMoney);
+                let _ = tx.send(UiCmd::ToggleBoss);
                 hotkey_ctx.request_repaint();
             }
         }));
@@ -335,6 +343,8 @@ impl App {
             hotkey,
             boss_hotkey,
             boss_key_error,
+            boss_hidden: false,
+            boss_restore_main: false,
             rx,
             last_forgot_check: Instant::now() - Duration::from_secs(60),
             floating_placed: false,
@@ -366,6 +376,8 @@ impl App {
     }
 
     pub fn show_main(&mut self, ctx: &egui::Context) {
+        // 主动打开主界面（托盘、再次启动程序、点悬浮条）就退出老板模式。
+        self.set_boss(false);
         self.hidden = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
@@ -376,6 +388,27 @@ impl App {
     fn hide_main(&mut self, ctx: &egui::Context) {
         self.hidden = true;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+    }
+
+    fn set_boss(&mut self, on: bool) {
+        self.boss_hidden = on;
+        self.shared.boss.store(on, Ordering::Relaxed);
+    }
+
+    /// 老板键：一键藏起主界面、悬浮条、提醒卡片和特效，新提醒先推迟；再按一次恢复原样。
+    fn toggle_boss(&mut self, ctx: &egui::Context) {
+        if self.boss_hidden {
+            let restore = self.boss_restore_main;
+            self.set_boss(false);
+            if restore {
+                self.show_main(ctx);
+            }
+        } else {
+            self.boss_restore_main = !self.hidden;
+            self.hide_main(ctx);
+            self.set_boss(true);
+        }
+        ctx.request_repaint();
     }
 
     /// 上班或下班。下班时结算并放特效。
@@ -470,6 +503,7 @@ impl App {
                     e.cfg.hide_money = !e.cfg.hide_money;
                     e.cfg_dirty = true;
                 }
+                UiCmd::ToggleBoss => self.toggle_boss(ctx),
                 UiCmd::ToggleLunch => {
                     let mut e = lock(&self.engine);
                     let now = local_now();
@@ -490,6 +524,7 @@ impl App {
         let e = lock(&self.engine);
         tray.floating.set_checked(e.cfg.floating_bar);
         tray.hide.set_checked(e.cfg.hide_money);
+        tray.boss.set_checked(self.boss_hidden);
         tray.clock.set_text(clock_menu_text(e.on_duty()));
         let in_lunch = e.lunch_until(local_now()).is_some();
         tray.lunch.set_text(lunch_menu_text(in_lunch));
@@ -662,11 +697,13 @@ impl App {
 
         // 三个窗口每帧都要提交，见 windows.rs 开头的说明。
         let alerts = e.alerts();
-        let alerts_on = !quiet && !alerts.is_empty();
+        let boss = self.boss_hidden;
+        let alerts_on = !quiet && !boss && !alerts.is_empty();
         let actions = windows::show_alerts(ctx, &alerts, &e.cfg, &pal, e.cfg.floating_bar, alerts_on);
         self.apply_alert_actions(ctx, e, now, actions);
 
-        let floating_on = e.cfg.floating_bar && !e.cfg.hide_money && !quiet;
+        // “隐藏金额”只打码，悬浮条照常显示 ***；老板键才把悬浮条藏起来。
+        let floating_on = e.cfg.floating_bar && !quiet && !boss;
         let stats = e.stats(now);
         let pending = e.alerts().len();
         let result = windows::show_floating(ctx, &stats, &e.cfg, &pal, &self.logo, pending, floating_on, self.floating_placed);
@@ -679,7 +716,8 @@ impl App {
             e.cfg_dirty = true;
         }
 
-        let done = windows::show_celebration(ctx, self.effect.as_ref(), &e.cfg, &pal, &self.logo);
+        let effect = if boss { None } else { self.effect.as_ref() };
+        let done = windows::show_celebration(ctx, effect, &e.cfg, &pal, &self.logo);
         if done || self.effect.as_ref().is_some_and(Celebration::finished) {
             self.effect = None;
         }
@@ -733,7 +771,7 @@ impl eframe::App for App {
         }
 
         // 疑似忘打卡要立刻让用户看到，哪怕窗口藏在托盘里。
-        if self.hidden && self.last_forgot_check.elapsed() > Duration::from_secs(5) {
+        if self.hidden && !self.boss_hidden && self.last_forgot_check.elapsed() > Duration::from_secs(5) {
             self.last_forgot_check = Instant::now();
             let forgotten = lock(&self.engine).forgotten(local_now()).is_some();
             if forgotten {

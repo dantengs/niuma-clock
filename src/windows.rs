@@ -235,24 +235,42 @@ pub fn show_floating(
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.scope_id().with("drag"), Sense::click_and_drag());
         // 按住移动超过 3 点就交给系统拖动（此时鼠标还按着，系统才接得住）；没移动就松开算单击。
+        // - 按下按坐标判断，不用 resp.hovered()：悬浮条以前有悬停提示，窗口太小，提示被挤回窗口里
+        //   盖住鼠标，悬浮条就不算“被悬停”，按下去既拖不动也点不开。提示已去掉，这里也不再依赖悬停。
+        // - egui 只在窗口有焦点时才执行 StartDrag。悬浮条平时不抢焦点，到阈值时还没拿到焦点就先要焦点，
+        //   下一帧再拖，而不是把拖动命令白白丢掉。
         let press_id = egui::Id::unique("floating-press");
-        let (pressed, down, pointer) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos()));
-        if pressed && resp.hovered() {
+        let (pressed, down, pointer, focused) = ui.input(|i| {
+            (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos(), i.viewport().focused)
+        });
+        if pressed && pointer.is_some_and(|p| rect.contains(p)) {
             ui.ctx().data_mut(|d| d.insert_temp(press_id, pointer));
         }
         let origin = ui.ctx().data(|d| d.get_temp::<Option<Pos2>>(press_id)).flatten();
+        if let Ok(path) = std::env::var("NIUMA_DEBUG_DRAG")
+            && (pressed || down || resp.clicked())
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(f, "{:?} pressed={pressed} down={down} focused={focused:?} hovered={} ptr={pointer:?} origin={origin:?} clicked={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() % 100_000).unwrap_or(0), resp.hovered(), resp.clicked());
+            }
+        }
         if !down {
             ui.ctx().data_mut(|d| d.remove::<Option<Pos2>>(press_id));
         } else if let (Some(origin), Some(pointer)) = (origin, pointer)
             && (pointer - origin).length() > 3.0
         {
-            ui.ctx().data_mut(|d| d.remove::<Option<Pos2>>(press_id));
-            ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+            if focused == Some(false) {
+                ui.ctx().send_viewport_cmd(ViewportCommand::Focus);
+            } else {
+                ui.ctx().data_mut(|d| d.remove::<Option<Pos2>>(press_id));
+                ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
+            }
+            ui.ctx().request_repaint();
         }
         if resp.clicked() {
             result.open_main = true;
         }
-        resp.on_hover_text("单击打开主界面，按住可以拖动");
 
         let painter = ui.painter();
         painter.rect(

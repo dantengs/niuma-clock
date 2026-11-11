@@ -1154,7 +1154,7 @@ impl App {
             section(ui, &pal, "桌面与外观", "");
             ui.checkbox(&mut e.cfg.floating_bar, "显示悬浮赚钱条（全屏或演示时自动隐藏）");
             let mut boss = e.cfg.boss_key;
-            if ui.checkbox(&mut boss, "老板键 Ctrl + Alt + B：隐藏金额和悬浮条").changed() {
+            if ui.checkbox(&mut boss, "老板键 Ctrl + Alt + B：一键藏起所有窗口（主界面、悬浮条、提醒卡片），再按一次恢复").changed() {
                 self.set_boss_key(e, boss);
             }
             if let Some(error) = &self.boss_key_error {

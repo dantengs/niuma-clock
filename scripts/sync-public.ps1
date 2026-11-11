@@ -28,6 +28,16 @@ foreach ($d in $dirs) {
     Copy-Item (Join-Path $root $d) $dst -Recurse
 }
 
+# Android project: sources only. Build output, Gradle caches, the machine's SDK path
+# (local.properties) and signing config / keys never leave this machine.
+$androidSrc = Join-Path $root "android"
+$androidSkip = '\\(build|\.gradle|\.idea|\.kotlin)(\\|$)|\\local\.properties$|\\keystore\.properties$|\.(jks|keystore)$'
+Get-ChildItem $androidSrc -Recurse -File -Force | Where-Object { $_.FullName.Substring($androidSrc.Length) -notmatch $androidSkip } | ForEach-Object {
+    $dst = Join-Path $pub ("android" + $_.FullName.Substring($androidSrc.Length))
+    New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null
+    Copy-Item $_.FullName $dst
+}
+
 # Privacy scan: user profile paths, drive paths outside Windows system folders, e-mail addresses
 # other than GitHub noreply / anthropic noreply, and the local user name.
 $user = $env:USERNAME

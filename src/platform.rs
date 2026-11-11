@@ -216,20 +216,11 @@ pub fn play_coins() {
 
 // ---------- 弹出窗口外观 ----------
 
-/// 清掉系统给本线程里这些无边框窗口加的装饰，每帧调用即可（没变化时什么也不做）：
-/// - Windows 11 的系统圆角和描边：悬浮条自己画圆角，系统再圆一次就会在四角露出一圈浅色底；
-/// - 窗口最上面一行像素：winit 的无边框窗口保留了标题栏样式，系统会在这一行画一条灰线，
-///   透明窗口上很显眼。用窗口区域把这一行裁掉。
-pub fn clean_popup_frames(titles: &[&str]) {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+/// 本线程里标题为 titles 之一的顶层窗口。
+fn thread_windows(titles: &[&str]) -> Vec<windows_sys::Win32::Foundation::HWND> {
     use windows_sys::Win32::Foundation::{HWND, LPARAM};
-    use windows_sys::Win32::Graphics::Dwm::{
-        DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
-    };
-    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
     use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetClientRect, GetWindowTextW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{EnumThreadWindows, GetWindowTextW};
 
     struct Search {
         titles: Vec<Vec<u16>>,
@@ -244,19 +235,36 @@ pub fn clean_popup_frames(titles: &[&str]) {
         }
         1
     }
-    // 每个窗口上次裁剪时的尺寸。窗口句柄存成整数，跨帧比较用。
-    static CLIPPED: Mutex<Option<HashMap<isize, (i32, i32)>>> = Mutex::new(None);
-
     let mut search = Search {
         titles: titles.iter().map(|t| t.encode_utf16().collect()).collect(),
         found: Vec::new(),
     };
     unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(visit), &mut search as *mut Search as LPARAM) };
+    search.found
+}
+
+/// 清掉系统给本线程里这些无边框窗口加的装饰，每帧调用即可（没变化时什么也不做）：
+/// - Windows 11 的系统圆角和描边：悬浮条自己画圆角，系统再圆一次就会在四角露出一圈浅色底；
+/// - 窗口最上面一行像素：winit 的无边框窗口保留了标题栏样式，系统会在这一行画一条灰线，
+///   透明窗口上很显眼。用窗口区域把这一行裁掉。
+pub fn clean_popup_frames(titles: &[&str]) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    // 每个窗口上次裁剪时的尺寸。窗口句柄存成整数，跨帧比较用。
+    static CLIPPED: Mutex<Option<HashMap<isize, (i32, i32)>>> = Mutex::new(None);
+
+    let found = thread_windows(titles);
     let mut clipped = CLIPPED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let clipped = clipped.get_or_insert_with(HashMap::new);
     // DWMWA_COLOR_NONE：不画边框。
     const COLOR_NONE: u32 = 0xFFFF_FFFE;
-    for &hwnd in &search.found {
+    for &hwnd in &found {
         let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         if unsafe { GetClientRect(hwnd, &mut rect) } == 0 || rect.right <= 0 || rect.bottom <= 1 {
             continue;
